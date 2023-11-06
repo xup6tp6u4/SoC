@@ -1,0 +1,122 @@
+#include <stdio.h>
+#include "platform.h"
+#include "xparameters.h"
+#include "xgpio.h"
+#include "xscugic.h"
+#include "xil_exception.h"
+#include "xil_printf.h"
+
+#define INTC_DEVICE_ID          XPAR_PS7_SCUGIC_0_DEVICE_ID
+#define BTNS_DEVICE_ID          XPAR_AXI_GPIO_1_DEVICE_ID
+#define LEDS_DEVICE_ID          XPAR_AXI_GPIO_0_DEVICE_ID
+#define INTC_GPIO_INTERRUPT_ID  XPAR_FABRIC_AXI_GPIO_1_IP2INTC_IRPT_INTR
+#define BTN_INT                XGPIO_IR_CH1_MASK
+
+XGpio LEDInst, BTNInst;
+XScuGic INTCInst;
+static int led_data;
+static int btn_value;
+static int delay_num = 1000000; // 延???，以微秒??位，初始化?1秒
+static int handler_times = 0; // 中??理次?，初始化?0
+static void BTN_Intr_Handler(void *baseaddr_p);
+static int InterruptSystemSetup(XScuGic *XScuGicInstancePtr);
+static int IntcInitFunction(u16 DeviceId, XGpio *GpioInstancePtr);
+
+void BTN_Intr_Handler(void *InstancePtr) {
+    // 禁用 GPIO 中?
+    XGpio_InterruptDisable(&BTNInst, BTN_INT);
+    // 忽略?外的按?按下
+    if ((XGpio_InterruptGetStatus(&BTNInst) & BTN_INT) != BTN_INT) {
+        return;
+    }
+
+    btn_value = XGpio_DiscreteRead(&BTNInst, 1);
+    // 根据按?值?增??器
+    // 如果按下中心按?，?重置
+    if (btn_value != 1)
+        led_data = led_data + btn_value;
+    else
+        led_data = 0;
+
+    XGpio_DiscreteWrite(&LEDInst, 1, led_data);
+    (void) XGpio_InterruptClear(&BTNInst, BTN_INT);
+    // ?用 GPIO 中?
+    XGpio_InterruptEnable(&BTNInst, BTN_INT);
+
+    // 使 LED 在中??理程序中??
+    int flash_count = 0;
+    while (flash_count < 2) {  // ?? LED 5 次
+        XGpio_DiscreteWrite(&LEDInst, 1, 0xFF);  // 打?所有 LED
+        usleep(500000);  // 休眠 0.5 秒
+        XGpio_DiscreteWrite(&LEDInst, 1, 0x00);  // ??所有 LED
+        usleep(500000);  // 休眠 0.5 秒
+        flash_count++;
+    }
+}
+
+int InterruptSystemSetup(XScuGic *XScuGicInstancePtr) {
+    XGpio_InterruptEnable(&BTNInst, BTN_INT);
+    XGpio_InterruptGlobalEnable(&BTNInst);
+
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT, (Xil_ExceptionHandler)XScuGic_InterruptHandler, XScuGicInstancePtr);
+    Xil_ExceptionEnable();
+
+    return XST_SUCCESS;
+}
+
+int IntcInitFunction(u16 DeviceId, XGpio *GpioInstancePtr) {
+    XScuGic_Config *IntcConfig;
+    int status;
+
+    IntcConfig = XScuGic_LookupConfig(DeviceId);
+    status = XScuGic_CfgInitialize(&INTCInst, IntcConfig, IntcConfig->CpuBaseAddress);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    status = InterruptSystemSetup(&INTCInst);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    status = XScuGic_Connect(&INTCInst, INTC_GPIO_INTERRUPT_ID, (Xil_ExceptionHandler)BTN_Intr_Handler, (void *)GpioInstancePtr);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    XGpio_InterruptEnable(GpioInstancePtr, 1);
+    XGpio_InterruptGlobalEnable(GpioInstancePtr);
+
+    XScuGic_Enable(&INTCInst, INTC_GPIO_INTERRUPT_ID);
+
+    return XST_SUCCESS;
+}
+
+int main() {
+    init_platform();
+
+    int status;
+    int LED_num = 0b11111111;
+
+    status = XGpio_Initialize(&LEDInst, LEDS_DEVICE_ID);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    status = XGpio_Initialize(&BTNInst, BTNS_DEVICE_ID);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    XGpio_SetDataDirection(&LEDInst, 1, 0x00);
+    XGpio_SetDataDirection(&BTNInst, 1, 0xFF);
+
+    status = IntcInitFunction(INTC_DEVICE_ID, &BTNInst);
+    if (status != XST_SUCCESS)
+        return XST_FAILURE;
+
+    while (1) {
+        XGpio_DiscreteWrite(&LEDInst, 1, LED_num);
+        LED_num = ~LED_num ;
+        printf("Delay : %d\n",delay_num);
+        printf("INTERRUPT_TIMES = %d\n",handler_times);
+        usleep(delay_num);
+    }
+
+    return 0;
+}
